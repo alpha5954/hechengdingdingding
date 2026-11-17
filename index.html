@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#171222">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>合成丁丁丁</title>
+<style>
+  html,body{height:100%;margin:0;overflow:hidden;background:#171222;
+    font-family:"PingFang SC","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
+  body{display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(120% 90% at 50% 0%,#2b2140 0%,#171222 60%,#0e0a16 100%);}
+  canvas{display:block;touch-action:none;border-radius:20px;
+    box-shadow:0 24px 70px rgba(0,0,0,.55);}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<script>
+(function(){
+'use strict';
+
+/* ------------------------------------------------------------------ config */
+const W = 400, H = 620;
+const JAR = { left: 14, right: 386, top: 148, bottom: 596 };
+const DANGER_Y = 196;
+const DROP_Y = 104;
+const GRAV = 1500;
+const REST = 0.10;
+const FRICTION = 0.45;
+const SUB = 1/120;
+const ITER = 5;
+const DROP_COOLDOWN = 0.30;
+const OVER_TIME = 1.2;
+
+const LV = [
+  {n:'宝宝丁', r:15, c1:'#FFD9E9', c2:'#F49ABE', ink:'#7A3550'},
+  {n:'宝丁宝', r:20, c1:'#FFE3C0', c2:'#F2A868', ink:'#7A4A25'},
+  {n:'丁宝宝', r:26, c1:'#FFF1AC', c2:'#E8C63C', ink:'#6B5610'},
+  {n:'丁丁宝', r:33, c1:'#C8F4CE', c2:'#6FCC8A', ink:'#2C6640'},
+  {n:'丁宝丁', r:41, c1:'#BBE6FF', c2:'#5AAFE9', ink:'#1E4E72'},
+  {n:'宝丁丁', r:50, c1:'#D8CAFF', c2:'#9879E8', ink:'#3A2A6B'},
+  {n:'丁丁丁', r:60, c1:'#FFB9CE', c2:'#E55282', ink:'#5A1530'}
+];
+const MAXLV = LV.length - 1;
+
+/* ------------------------------------------------------------------ state */
+let B = [], parts = [], floats = [];
+let score = 0, best = 0, combo = 0, comboT = 0;
+let curLv = 0, nextLv = 0, aimX = W/2, cool = 0;
+let gameOver = false, overT = 0, shake = 0, tGlobal = 0;
+let muted = false;
+
+try { best = parseInt(localStorage.getItem('ddd_best') || '0', 10) || 0; } catch(e){}
+try { muted = localStorage.getItem('ddd_mute') === '1'; } catch(e){}
+
+/* ------------------------------------------------------------------ audio */
+let actx = null;
+function audio(){
+  if (!actx) {
+    try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){}
+  }
+  if (actx && actx.state === 'suspended') actx.resume();
+  return actx;
+}
+function tone(freq, dur, type, gain, slideTo){
+  const a = audio(); if (!a || muted) return;
+  const t0 = a.currentTime;
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = type || 'sine';
+  o.frequency.setValueAtTime(freq, t0);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(gain, t0 + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g); g.connect(a.destination);
+  o.start(t0); o.stop(t0 + dur + 0.03);
+}
+const SCALE = [0, 2, 4, 7, 9, 12, 14];
+function sndMerge(lv){
+  const f = 294 * Math.pow(2, SCALE[lv % SCALE.length] / 12);
+  tone(f, 0.16, 'triangle', 0.10, f * 1.6);
+  tone(f * 2, 0.09, 'sine', 0.04, f * 2.6);
+}
+function sndDrop(){ tone(150, 0.10, 'triangle', 0.06, 80); }
+function sndOver(){ [0, -3, -7].forEach((s, i) => {
+  setTimeout(() => tone(392 * Math.pow(2, s/12), 0.35, 'sine', 0.09), i * 170);
+}); }
+
+/* ------------------------------------------------------------------ helpers */
+const rnd = (a, b) => a + Math.random() * (b - a);
+function pickSpawn(){
+  const r = Math.random();
+  if (r < 0.45) return 0;
+  if (r < 0.80) return 1;
+  if (r < 0.95) return 2;
+  return 3;
+}
+function makeBody(x, y, lv, vx, vy){
+  const r = LV[lv].r;
+  return { x, y, vx: vx || 0, vy: vy || 0, r, lv, m: r*r,
+           angle: 0, av: 0, seed: Math.random()*10, pop: 0, dead: false };
+}
+function burst(x, y, col, n, spd){
+  for (let i = 0; i < n; i++){
+    const a = Math.random() * Math.PI * 2;
+    const s = rnd(60, 220) * spd;
+    parts.push({ x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s - 40,
+                 r: rnd(2, 5), life: 1, col });
+  }
+}
+function floatText(x, y, txt, col){
+  floats.push({ x, y, txt, col, life: 1 });
+}
+function clampAim(){
+  const r = LV[curLv].r;
+  aimX = Math.max(JAR.left + r + 2, Math.min(JAR.right - r - 2, aimX));
+}
+
+/* ------------------------------------------------------------------ physics */
+function stepPhysics(dt){
+  const n = B.length;
+  for (let i = 0; i < n; i++){
+    const b = B[i];
+    b.vy += GRAV * dt;
+    b.vx *= 0.999; b.vy *= 0.999;
+    const sp = Math.hypot(b.vx, b.vy);
+    if (sp > 2600){ b.vx *= 2600/sp; b.vy *= 2600/sp; }
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    b.angle += b.av * dt; b.av *= 0.985;
+    if (b.pop > 0) b.pop = Math.max(0, b.pop - dt * 4.5);
+  }
+  const SLOP = 0.6;
+  for (let it = 0; it < ITER; it++){
+    for (let i = 0; i < n; i++){
+      const a = B[i];
+      for (let j = i + 1; j < n; j++){
+        const b = B[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const rr = a.r + b.r;
+        const d2 = dx*dx + dy*dy;
+        if (d2 >= rr*rr || d2 < 1e-9) continue;
+        const d = Math.sqrt(d2);
+        const nx = dx/d, ny = dy/d;
+        const pen = rr - d;
+        const ia = 1/a.m, ib = 1/b.m, im = ia + ib;
+        if (pen > SLOP){
+          const corr = (pen - SLOP) * 0.55;
+          a.x -= nx * corr * (ia/im); a.y -= ny * corr * (ia/im);
+          b.x += nx * corr * (ib/im); b.y += ny * corr * (ib/im);
+        }
+        const rvx = b.vx - a.vx, rvy = b.vy - a.vy;
+        const vn = rvx*nx + rvy*ny;
+        if (vn < 0){
+          const e = pen > 4 ? 0.0 : REST;
+          const jn = -(1 + e) * vn / im;
+          a.vx -= jn*nx*ia; a.vy -= jn*ny*ia;
+          b.vx += jn*nx*ib; b.vy += jn*ny*ib;
+          const tx = -ny, ty = nx;
+          const vt = rvx*tx + rvy*ty;
+          let jt = -vt / im;
+          const lim = jn * FRICTION;
+          jt = Math.max(-lim, Math.min(lim, jt));
+          a.vx -= jt*tx*ia; a.vy -= jt*ty*ia;
+          b.vx += jt*tx*ib; b.vy += jt*ty*ib;
+          a.av += vt / a.r * 0.02;
+          b.av -= vt / b.r * 0.02;
+        }
+      }
+    }
+    for (let i = 0; i < n; i++){
+      const a = B[i];
+      if (a.x - a.r < JAR.left){
+        a.x = JAR.left + a.r;
+        if (a.vx < 0) a.vx = -a.vx * REST;
+      }
+      if (a.x + a.r > JAR.right){
+        a.x = JAR.right - a.r;
+        if (a.vx > 0) a.vx = -a.vx * REST;
+      }
+      if (a.y + a.r > JAR.bottom){
+        a.y = JAR.bottom - a.r;
+        if (a.vy > 0) a.vy = -a.vy * REST;
+        a.vx *= 0.90;
+      }
+    }
+  }
+  for (let i = 0; i < n; i++){
+    const b = B[i];
+    if (b.x - b.r < JAR.left) b.x = JAR.left + b.r;
+    if (b.x + b.r > JAR.right) b.x = JAR.right - b.r;
+    if (b.y + b.r > JAR.bottom) b.y = JAR.bottom - b.r;
+    const sp2 = b.vx*b.vx + b.vy*b.vy;
+    if (sp2 < 36){ b.vx *= 0.55; b.vy *= 0.55; }
+  }
+}
+
+function doMerges(){
+  let any = false;
+  const n = B.length;
+  for (let i = 0; i < n; i++){
+    const a = B[i];
+    if (a.dead) continue;
+    for (let j = i + 1; j < n; j++){
+      const b = B[j];
+      if (b.dead || a.dead) continue;
+      if (a.lv !== b.lv) continue;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const rr = a.r + b.r + 0.8;
+      if (dx*dx + dy*dy >= rr*rr) continue;
+      a.dead = b.dead = true;
+      any = true;
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      const lv = a.lv;
+      combo++;
+      comboT = 0.75;
+      const mult = Math.min(5, 1 + 0.5 * (combo - 1));
+      if (lv < MAXLV){
+        const nb = makeBody(mx, my, lv + 1, (a.vx + b.vx)*0.5, (a.vy + b.vy)*0.5);
+        nb.x = Math.max(JAR.left + nb.r, Math.min(JAR.right - nb.r, nb.x));
+        nb.y = Math.min(JAR.bottom - nb.r, nb.y);
+        nb.pop = 1;
+        nb.seed = Math.random()*10;
+        B.push(nb);
+        const pts = Math.round((lv + 1) * (lv + 1) * 5 * mult);
+        score += pts;
+        floatText(mx, my - 10, '+' + pts, LV[lv].ink);
+        burst(mx, my, LV[lv + 1].c2, 10, 1);
+        sndMerge(lv);
+        shake = Math.min(1, shake + 0.25 + lv * 0.08);
+      } else {
+        const pts = Math.round(600 * mult);
+        score += pts;
+        floatText(mx, my - 10, '+' + pts, '#fff');
+        burst(mx, my, '#FFD1E0', 26, 1.8);
+        sndMerge(lv);
+        shake = 1;
+      }
+      if (score > best){
+        best = score;
+        try { localStorage.setItem('ddd_best', String(best)); } catch(e){}
+      }
+    }
+  }
+  if (any) B = B.filter(b => !b.dead);
+}
+
+/* ------------------------------------------------------------------ actions */
+function drop(){
+  if (gameOver || cool > 0) return;
+  audio();
+  const r = LV[curLv].r;
+  const x = Math.max(JAR.left + r + 2, Math.min(JAR.right - r - 2, aimX));
+  B.push(makeBody(x, DROP_Y, curLv, 0, 120));
+  sndDrop();
+  curLv = nextLv;
+  nextLv = pickSpawn();
+  cool = DROP_COOLDOWN;
+  clampAim();
+}
+
+function reset(){
+  B = []; parts = []; floats = [];
+  score = 0; combo = 0; comboT = 0; overT = 0;
+  gameOver = false; shake = 0; cool = 0;
+  curLv = pickSpawn(); nextLv = pickSpawn();
+  aimX = W/2; clampAim();
+}
+
+/* ------------------------------------------------------------------ draw */
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let dpr = 1, scale = 1;
+
+function fit(){
+  dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+  const vw = window.innerWidth, vh = window.innerHeight;
+  scale = Math.min(vw / W, vh / H);
+  cv.style.width = (W * scale) + 'px';
+  cv.style.height = (H * scale) + 'px';
+  cv.width = Math.round(W * scale * dpr);
+  cv.height = Math.round(H * scale * dpr);
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+}
+window.addEventListener('resize', fit);
+
+function roundRect(x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawFruit(x, y, lv, r, pop, seed, isGhost){
+  const L = LV[lv];
+  const sc = 1 + pop * 0.30;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(sc, sc);
+  if (isGhost) ctx.globalAlpha = 0.9;
+
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,.28)';
+  ctx.shadowBlur = 10 + r * 0.18;
+  ctx.shadowOffsetY = 3 + r * 0.06;
+  const g = ctx.createRadialGradient(-r*0.35, -r*0.40, r*0.1, 0, 0, r*1.05);
+  g.addColorStop(0, '#ffffff');
+  g.addColorStop(0.28, L.c1);
+  g.addColorStop(1, L.c2);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  ctx.lineWidth = Math.max(1.6, r * 0.06);
+  ctx.strokeStyle = L.c2;
+  ctx.beginPath(); ctx.arc(0, 0, r - ctx.lineWidth*0.5, 0, Math.PI*2); ctx.stroke();
+
+  // shine
+  ctx.save();
+  ctx.globalAlpha = 0.5;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.ellipse(-r*0.34, -r*0.44, r*0.26, r*0.16, -0.5, 0, Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+
+  // face
+  if (r >= 18){
+    const blink = Math.sin(tGlobal * 0.9 + seed * 2.1) > 0.985;
+    const ey = -r * 0.26, ex = r * 0.30, er = r * 0.115;
+    ctx.fillStyle = '#2b2233';
+    if (blink){
+      ctx.lineWidth = Math.max(1.2, r*0.045);
+      ctx.strokeStyle = '#2b2233';
+      [-ex, ex].forEach(dx => {
+        ctx.beginPath(); ctx.moveTo(dx - er, ey); ctx.lineTo(dx + er, ey); ctx.stroke();
+      });
+    } else {
+      [-ex, ex].forEach(dx => {
+        ctx.beginPath(); ctx.arc(dx, ey, er, 0, Math.PI*2); ctx.fill();
+      });
+      ctx.fillStyle = 'rgba(255,255,255,.9)';
+      [-ex, ex].forEach(dx => {
+        ctx.beginPath(); ctx.arc(dx - er*0.32, ey - er*0.34, er*0.34, 0, Math.PI*2); ctx.fill();
+      });
+    }
+    ctx.strokeStyle = '#2b2233';
+    ctx.lineWidth = Math.max(1.1, r*0.038);
+    ctx.beginPath();
+    ctx.arc(0, ey + r*0.10, r*0.16, 0.18*Math.PI, 0.82*Math.PI);
+    ctx.stroke();
+  }
+
+  // name
+  const fs = Math.max(8, r * 0.56);
+  ctx.font = '700 ' + fs.toFixed(1) + 'px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = L.ink;
+  ctx.fillText(L.n, 0, r * 0.46);
+
+  ctx.restore();
+}
+
+function draw(){
+  ctx.save();
+  if (shake > 0.01){
+    ctx.translate(rnd(-1,1)*shake*4, rnd(-1,1)*shake*4);
+  }
+
+  // backdrop
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#241b36');
+  bg.addColorStop(1, '#150f22');
+  ctx.fillStyle = bg;
+  ctx.fillRect(-10, -10, W + 20, H + 20);
+
+  // soft blobs
+  ['rgba(255,120,170,.10)', 'rgba(120,200,255,.08)'].forEach((c, i) => {
+    const gg = ctx.createRadialGradient(i ? 330 : 70, i ? 520 : 120, 10,
+                                        i ? 330 : 70, i ? 520 : 120, 240);
+    gg.addColorStop(0, c); gg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = gg;
+    ctx.fillRect(0, 0, W, H);
+  });
+
+  // jar
+  ctx.save();
+  roundRect(JAR.left, JAR.top, JAR.right - JAR.left, JAR.bottom - JAR.top, 22);
+  ctx.fillStyle = 'rgba(255,255,255,.055)';
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = 'rgba(255,255,255,.16)';
+  ctx.stroke();
+  ctx.restore();
+
+  // danger line
+  ctx.save();
+  ctx.setLineDash([7, 7]);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = overT > 0 ? 'rgba(255,90,130,.85)' : 'rgba(255,255,255,.14)';
+  ctx.beginPath();
+  ctx.moveTo(JAR.left + 8, DANGER_Y);
+  ctx.lineTo(JAR.right - 8, DANGER_Y);
+  ctx.stroke();
+  ctx.restore();
+
+  // particles
+  for (const p of parts){
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.col;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // bodies
+  for (const b of B) drawFruit(b.x, b.y, b.lv, b.r, b.pop, b.seed, false);
+
+  // floating scores
+  for (const f of floats){
+    ctx.globalAlpha = Math.max(0, Math.min(1, f.life));
+    ctx.font = '800 16px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = f.col;
+    ctx.fillText(f.txt, f.x, f.y);
+    ctx.globalAlpha = 1;
+  }
+
+  // hanging fruit
+  if (!gameOver){
+    const r = LV[curLv].r;
+    const x = Math.max(JAR.left + r + 2, Math.min(JAR.right - r - 2, aimX));
+    ctx.save();
+    ctx.globalAlpha = 0.20;
+    ctx.strokeStyle = '#fff';
+    ctx.setLineDash([4, 8]);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, DROP_Y + r);
+    ctx.lineTo(x, JAR.bottom);
+    ctx.stroke();
+    ctx.restore();
+    drawFruit(x, DROP_Y, curLv, r, 0, 0, false);
+  }
+
+  // HUD
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(255,255,255,.92)';
+  ctx.font = '800 21px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillText('合成丁丁丁', 16, 28);
+
+  ctx.font = '600 14px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,.55)';
+  ctx.fillText('分数', 16, 58);
+  ctx.fillStyle = '#fff';
+  ctx.font = '800 18px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillText(String(score), 58, 58);
+
+  ctx.textAlign = 'right';
+  ctx.font = '600 14px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,.55)';
+  ctx.fillText('最高', W - 58, 58);
+  ctx.fillStyle = 'rgba(255,255,255,.85)';
+  ctx.font = '800 18px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillText(String(best), W - 16, 58);
+
+  // next preview
+  const nx = W/2 - 34, ny = 50;
+  ctx.beginPath(); ctx.arc(nx, ny, 8, 0, Math.PI*2);
+  ctx.fillStyle = LV[nextLv].c1; ctx.fill();
+  ctx.lineWidth = 1.6; ctx.strokeStyle = LV[nextLv].c2; ctx.stroke();
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.font = '600 11px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,.42)';
+  ctx.fillText('下一个', nx + 14, ny + 1);
+  ctx.font = '700 12px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,.78)';
+  ctx.fillText(LV[nextLv].n, nx + 58, ny + 1);
+
+  // mute button
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  ctx.beginPath(); ctx.arc(W - 22, 24, 15, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(255,255,255,.10)';
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.8)';
+  ctx.font = '700 14px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(muted ? '🔇' : '🔊', W - 22, 25);
+  ctx.restore();
+
+  // combo
+  if (combo > 1 && comboT > 0){
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, comboT * 2);
+    ctx.font = '800 22px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#FFD166';
+    ctx.fillText(combo + ' 连击', W/2, 116);
+    ctx.restore();
+  }
+
+  // game over
+  if (gameOver){
+    ctx.fillStyle = 'rgba(9,6,14,.82)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    roundRect(W/2 - 150, H/2 - 140, 300, 302, 26);
+    ctx.fillStyle = 'rgba(26,18,38,.96)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,.12)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff';
+    ctx.font = '800 32px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillText('装不下啦', W/2, H/2 - 92);
+
+    ctx.font = '600 14px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,.55)';
+    ctx.fillText('本局得分', W/2, H/2 - 44);
+
+    ctx.font = '800 46px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = '#FFB3C9';
+    ctx.fillText(String(score), W/2, H/2 + 4);
+
+    ctx.font = '600 13px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,.45)';
+    ctx.fillText('最高 ' + best, W/2, H/2 + 44);
+
+    ctx.save();
+    roundRect(W/2 - 82, H/2 + 74, 164, 50, 25);
+    ctx.fillStyle = '#E55282';
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = '800 19px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillText('再来一局', W/2, H/2 + 100);
+    ctx.restore();
+
+    ctx.font = '600 12px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,.30)';
+    ctx.fillText('点击任意处重新开始', W/2, H/2 + 146);
+  }
+
+  ctx.restore();
+}
+
+/* ------------------------------------------------------------------ loop */
+let last = 0, acc = 0;
+function update(dt){
+  tGlobal += dt;
+  if (cool > 0) cool = Math.max(0, cool - dt);
+  if (comboT > 0){ comboT -= dt; if (comboT <= 0) combo = 0; }
+  if (shake > 0) shake = Math.max(0, shake - dt * 2.2);
+
+  if (!gameOver){
+    stepPhysics(dt);
+    doMerges();
+
+    let above = false;
+    for (const b of B){
+      if (b.y - b.r < DANGER_Y) { above = true; break; }
+    }
+    overT = above ? overT + dt : Math.max(0, overT - dt * 2);
+    if (overT > OVER_TIME){
+      gameOver = true;
+      sndOver();
+    }
+  } else {
+    for (const b of B){ b.vy += GRAV * dt * 0.25; b.y += b.vy * dt * 0.25; }
+  }
+
+  for (let i = parts.length - 1; i >= 0; i--){
+    const p = parts[i];
+    p.vy += 900 * dt; p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx *= 0.98; p.life -= dt * 1.8;
+    if (p.life <= 0) parts.splice(i, 1);
+  }
+  for (let i = floats.length - 1; i >= 0; i--){
+    const f = floats[i];
+    f.y -= 34 * dt; f.life -= dt * 1.1;
+    if (f.life <= 0) floats.splice(i, 1);
+  }
+}
+
+function frame(ts){
+  if (!last) last = ts;
+  let dt = (ts - last) / 1000;
+  last = ts;
+  if (dt > 0.1) dt = 0.1;
+  acc += dt;
+  let guard = 0;
+  while (acc >= SUB && guard < 12){ update(SUB); acc -= SUB; guard++; }
+  if (guard >= 12) acc = 0;
+  draw();
+  requestAnimationFrame(frame);
+}
+
+/* ------------------------------------------------------------------ input */
+function toLogicalPoint(ev){
+  const r = cv.getBoundingClientRect();
+  return {
+    x: ((ev.clientX - r.left) / r.width) * W,
+    y: ((ev.clientY - r.top) / r.height) * H
+  };
+}
+let swallow = false;
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  audio();
+  if (gameOver){ reset(); swallow = true; return; }
+  const p = toLogicalPoint(e);
+  if (Math.hypot(p.x - (W - 22), p.y - 24) < 26){
+    muted = !muted;
+    try { localStorage.setItem('ddd_mute', muted ? '1' : '0'); } catch(err){}
+    swallow = true;
+    return;
+  }
+  swallow = false;
+  aimX = p.x; clampAim();
+});
+cv.addEventListener('pointermove', e => {
+  if (gameOver) return;
+  aimX = toLogicalPoint(e).x; clampAim();
+});
+function endPointer(e){
+  e.preventDefault();
+  if (swallow){ swallow = false; return; }
+  if (gameOver) return;
+  if (toLogicalPoint(e).y < 88) return;
+  drop();
+}
+cv.addEventListener('pointerup', endPointer);
+cv.addEventListener('pointercancel', e => { swallow = false; });
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft'){ aimX -= 18; clampAim(); }
+  else if (e.key === 'ArrowRight'){ aimX += 18; clampAim(); }
+  else if (e.key === ' ' || e.key === 'Enter'){ e.preventDefault(); if (gameOver) reset(); else drop(); }
+  else if (e.key === 'm' || e.key === 'M'){
+    muted = !muted;
+    try { localStorage.setItem('ddd_mute', muted ? '1' : '0'); } catch(err){}
+  }
+});
+
+/* ------------------------------------------------------------ test hook */
+window.__DDD = {
+  get B(){ return B; },
+  set B(v){ B = v; },
+  get score(){ return score; },
+  set score(v){ score = v; },
+  set gameOver(v){ gameOver = v; },
+  get overT(){ return overT; },
+  stepPhysics, doMerges, makeBody, pickSpawn, reset,
+  JAR, DROP_Y, SUB, DANGER_Y, LV, MAXLV
+};
+
+/* ------------------------------------------------------------------ boot */
+reset();
+fit();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
