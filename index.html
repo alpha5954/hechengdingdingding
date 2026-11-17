@@ -255,7 +255,7 @@ function doMerges(){
         B.push(nb);
         const pts = Math.round((lv + 1) * (lv + 1) * 5 * mult);
         score += pts;
-        floatText(mx, my - 10, '+' + pts, LV[lv].ink);
+        floatText(mx, my - 10, '+' + pts, '#FFE9A8');
         burst(mx, my, LV[lv + 1].c2, 10, 1);
         sndMerge(lv);
         shake = Math.min(1, shake + 0.25 + lv * 0.08);
@@ -540,7 +540,7 @@ function draw(){
     ctx.font = '800 22px "PingFang SC","Microsoft YaHei",sans-serif';
     ctx.textAlign = 'center';
     ctx.fillStyle = '#FFD166';
-    ctx.fillText(combo + ' 连击', W/2, 116);
+    ctx.fillText(combo + ' 连击', W/2, 142);
     ctx.restore();
   }
 
@@ -607,15 +607,15 @@ function update(dt){
 
     let above = false;
     for (const b of B){
-      if (b.y - b.r < DANGER_Y) { above = true; break; }
+      if (b.y - b.r < DANGER_Y && Math.abs(b.vy) < 90 && Math.abs(b.vx) < 90){
+        above = true; break;
+      }
     }
     overT = above ? overT + dt : Math.max(0, overT - dt * 2);
     if (overT > OVER_TIME){
       gameOver = true;
       sndOver();
     }
-  } else {
-    for (const b of B){ b.vy += GRAV * dt * 0.25; b.y += b.vy * dt * 0.25; }
   }
 
   for (let i = parts.length - 1; i >= 0; i--){
@@ -658,7 +658,7 @@ cv.addEventListener('pointerdown', e => {
   audio();
   if (gameOver){ reset(); swallow = true; return; }
   const p = toLogicalPoint(e);
-  if (Math.hypot(p.x - (W - 22), p.y - 24) < 26){
+  if (Math.hypot(p.x - (W - 22), p.y - 24) < 22){
     muted = !muted;
     try { localStorage.setItem('ddd_mute', muted ? '1' : '0'); } catch(err){}
     swallow = true;
@@ -696,9 +696,10 @@ window.__DDD = {
   set B(v){ B = v; },
   get score(){ return score; },
   set score(v){ score = v; },
+  get gameOver(){ return gameOver; },
   set gameOver(v){ gameOver = v; },
   get overT(){ return overT; },
-  stepPhysics, doMerges, makeBody, pickSpawn, reset,
+  stepPhysics, doMerges, makeBody, pickSpawn, reset, drop, update,
   JAR, DROP_Y, SUB, DANGER_Y, LV, MAXLV
 };
 
