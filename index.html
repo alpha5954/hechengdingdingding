@@ -36,13 +36,17 @@ const DROP_COOLDOWN = 0.30;
 const OVER_TIME = 1.2;
 
 const LV = [
-  {n:'宝宝丁', r:15, c1:'#FFD9E9', c2:'#F49ABE', ink:'#7A3550'},
-  {n:'宝丁宝', r:20, c1:'#FFE3C0', c2:'#F2A868', ink:'#7A4A25'},
-  {n:'丁宝宝', r:26, c1:'#FFF1AC', c2:'#E8C63C', ink:'#6B5610'},
-  {n:'丁丁宝', r:33, c1:'#C8F4CE', c2:'#6FCC8A', ink:'#2C6640'},
-  {n:'丁宝丁', r:41, c1:'#BBE6FF', c2:'#5AAFE9', ink:'#1E4E72'},
-  {n:'宝丁丁', r:50, c1:'#D8CAFF', c2:'#9879E8', ink:'#3A2A6B'},
-  {n:'丁丁丁', r:60, c1:'#FFB9CE', c2:'#E55282', ink:'#5A1530'}
+  {n:'宝宝丁',       r:14, c1:'#FFD9E9', c2:'#F49ABE', ink:'#7A3550'},
+  {n:'宝丁宝',       r:16, c1:'#FFE3C0', c2:'#F2A868', ink:'#7A4A25'},
+  {n:'丁宝宝',       r:19, c1:'#FFF1AC', c2:'#E8C63C', ink:'#6B5610'},
+  {n:'丁丁宝',       r:22, c1:'#C8F4CE', c2:'#6FCC8A', ink:'#2C6640'},
+  {n:'丁宝丁',       r:26, c1:'#BBE6FF', c2:'#5AAFE9', ink:'#1E4E72'},
+  {n:'宝丁丁',       r:31, c1:'#D8CAFF', c2:'#9879E8', ink:'#3A2A6B'},
+  {n:'丁丁丁',       r:36, c1:'#FFB9CE', c2:'#E55282', ink:'#5A1530'},
+  {n:'丁丁丁丁',     r:42, c1:'#FFC9A8', c2:'#E07A3C', ink:'#6B2C0E'},
+  {n:'丁丁丁丁丁',   r:48, c1:'#FFE08A', c2:'#CF9A12', ink:'#5C4300'},
+  {n:'丁丁丁丁丁丁', r:55, c1:'#A8F0DE', c2:'#22A88E', ink:'#0E4A3F'},
+  {n:'超级丁',       r:64, c1:'#FFF6D0', c2:'#D9A21B', ink:'#5A3E00'}
 ];
 const MAXLV = LV.length - 1;
 
@@ -93,10 +97,11 @@ function sndOver(){ [0, -3, -7].forEach((s, i) => {
 const rnd = (a, b) => a + Math.random() * (b - a);
 function pickSpawn(){
   const r = Math.random();
-  if (r < 0.45) return 0;
-  if (r < 0.80) return 1;
-  if (r < 0.95) return 2;
-  return 3;
+  if (r < 0.32) return 0;
+  if (r < 0.60) return 1;
+  if (r < 0.80) return 2;
+  if (r < 0.93) return 3;
+  return 4;
 }
 function makeBody(x, y, lv, vx, vy){
   const r = LV[lv].r;
@@ -125,7 +130,7 @@ function stepPhysics(dt){
   for (let i = 0; i < n; i++){
     const b = B[i];
     b.vy += GRAV * dt;
-    b.vx *= 0.999; b.vy *= 0.999;
+    b.vx *= 0.995; b.vy *= 0.995;
     const sp = Math.hypot(b.vx, b.vy);
     if (sp > 2600){ b.vx *= 2600/sp; b.vy *= 2600/sp; }
     b.x += b.vx * dt; b.y += b.vy * dt;
@@ -187,11 +192,35 @@ function stepPhysics(dt){
       }
     }
   }
+  // position-only relaxation: stops small balls being squeezed into big ones
+  for (let pass = 0; pass < 2; pass++){
+    for (let i = 0; i < n; i++){
+      const a = B[i];
+      for (let j = i + 1; j < n; j++){
+        const b = B[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const rr = a.r + b.r;
+        const d2 = dx*dx + dy*dy;
+        if (d2 >= rr*rr || d2 < 1e-9) continue;
+        const d = Math.sqrt(d2);
+        const pen = rr - d;
+        if (pen < 0.05) continue;
+        const nx = dx/d, ny = dy/d;
+        const ia = 1/a.m, ib = 1/b.m, im = ia + ib;
+        const c = pen * 0.70;
+        a.x -= nx * c * (ia/im); a.y -= ny * c * (ia/im);
+        b.x += nx * c * (ib/im); b.y += ny * c * (ib/im);
+      }
+    }
+    for (let i = 0; i < n; i++){
+      const b = B[i];
+      if (b.x - b.r < JAR.left) b.x = JAR.left + b.r;
+      if (b.x + b.r > JAR.right) b.x = JAR.right - b.r;
+      if (b.y + b.r > JAR.bottom) b.y = JAR.bottom - b.r;
+    }
+  }
   for (let i = 0; i < n; i++){
     const b = B[i];
-    if (b.x - b.r < JAR.left) b.x = JAR.left + b.r;
-    if (b.x + b.r > JAR.right) b.x = JAR.right - b.r;
-    if (b.y + b.r > JAR.bottom) b.y = JAR.bottom - b.r;
     const sp2 = b.vx*b.vx + b.vy*b.vy;
     if (sp2 < 36){ b.vx *= 0.55; b.vy *= 0.55; }
   }
@@ -231,7 +260,7 @@ function doMerges(){
         sndMerge(lv);
         shake = Math.min(1, shake + 0.25 + lv * 0.08);
       } else {
-        const pts = Math.round(600 * mult);
+        const pts = Math.round(2000 * mult);
         score += pts;
         floatText(mx, my - 10, '+' + pts, '#fff');
         burst(mx, my, '#FFD1E0', 26, 1.8);
@@ -317,7 +346,15 @@ function drawFruit(x, y, lv, r, pop, seed, isGhost){
   ctx.restore();
 
   ctx.lineWidth = Math.max(1.6, r * 0.06);
-  ctx.strokeStyle = L.c2;
+  if (lv === MAXLV){
+    const rg = ctx.createLinearGradient(-r, -r, r, r);
+    rg.addColorStop(0, '#FF6B9D'); rg.addColorStop(0.33, '#FFD166');
+    rg.addColorStop(0.66, '#6BE3C2'); rg.addColorStop(1, '#8FA8FF');
+    ctx.strokeStyle = rg;
+    ctx.lineWidth = Math.max(3, r * 0.085);
+  } else {
+    ctx.strokeStyle = L.c2;
+  }
   ctx.beginPath(); ctx.arc(0, 0, r - ctx.lineWidth*0.5, 0, Math.PI*2); ctx.stroke();
 
   // shine
@@ -357,7 +394,7 @@ function drawFruit(x, y, lv, r, pop, seed, isGhost){
   }
 
   // name
-  const fs = Math.max(8, r * 0.56);
+  const fs = Math.max(7, Math.min(r * 0.56, (r * 1.58) / Math.max(1, L.n.length)));
   ctx.font = '700 ' + fs.toFixed(1) + 'px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
