@@ -23,10 +23,12 @@
 'use strict';
 
 /* ------------------------------------------------------------------ config */
+const VERSION = 'v1.1';
 const W = 400, H = 620;
 const JAR = { left: 14, right: 386, top: 148, bottom: 596 };
 const DANGER_Y = 196;
-const DROP_Y = 104;
+const DROP_Y = 116;
+const GOAL_Y = 74;
 const GRAV = 1500;
 const REST = 0.10;
 const FRICTION = 0.45;
@@ -51,10 +53,11 @@ const LV = [
 const MAXLV = LV.length - 1;
 
 /* ------------------------------------------------------------------ state */
-let B = [], parts = [], floats = [];
-let score = 0, best = 0, combo = 0, comboT = 0;
+let B = [], parts = [], floats = [], chars = [];
+let score = 0, best = 0, combo = 0, comboT = 0, maxCombo = 0, maxLevelMade = 0;
 let curLv = 0, nextLv = 0, aimX = W/2, cool = 0;
-let gameOver = false, overT = 0, shake = 0, tGlobal = 0;
+let gameOver = false, overT = 0, rescued = false, shake = 0, tGlobal = 0;
+let hitstop = 0, ceremony = 0, heartT = 0, goals = [], goalFlash = 0;
 let muted = false;
 
 try { best = parseInt(localStorage.getItem('ddd_best') || '0', 10) || 0; } catch(e){}
@@ -69,9 +72,9 @@ function audio(){
   if (actx && actx.state === 'suspended') actx.resume();
   return actx;
 }
-function tone(freq, dur, type, gain, slideTo){
+function tone(freq, dur, type, gain, slideTo, delay){
   const a = audio(); if (!a || muted) return;
-  const t0 = a.currentTime;
+  const t0 = a.currentTime + (delay || 0);
   const o = a.createOscillator(), g = a.createGain();
   o.type = type || 'sine';
   o.frequency.setValueAtTime(freq, t0);
@@ -82,19 +85,32 @@ function tone(freq, dur, type, gain, slideTo){
   o.connect(g); g.connect(a.destination);
   o.start(t0); o.stop(t0 + dur + 0.03);
 }
-const SCALE = [0, 2, 4, 7, 9, 12, 14];
-function sndMerge(lv){
-  const f = 294 * Math.pow(2, SCALE[lv % SCALE.length] / 12);
-  tone(f, 0.16, 'triangle', 0.10, f * 1.6);
-  tone(f * 2, 0.09, 'sine', 0.04, f * 2.6);
+const SCALE = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24];
+function sndMerge(lv, cb){
+  const f = 262 * Math.pow(2, SCALE[Math.min(lv, SCALE.length - 1)] / 12) *
+            Math.pow(2, Math.min(cb || 0, 6) * 0.03);
+  tone(f, 0.17, 'triangle', 0.10, f * 1.55);
+  tone(f * 2, 0.09, 'sine', 0.035, f * 2.5);
+  if (lv >= 4) tone(96, 0.20, 'sine', 0.11, 62);
+  if ((cb || 0) >= 3) tone(f * 1.5, 0.12, 'sine', 0.05, f * 2);
 }
-function sndDrop(){ tone(150, 0.10, 'triangle', 0.06, 80); }
+function sndDrop(){ tone(150, 0.10, 'triangle', 0.05, 80); }
 function sndOver(){ [0, -3, -7].forEach((s, i) => {
   setTimeout(() => tone(392 * Math.pow(2, s/12), 0.35, 'sine', 0.09), i * 170);
 }); }
+function sndGoal(){ [0, 4, 7, 12].forEach((s, i) => {
+  setTimeout(() => tone(523 * Math.pow(2, s/12), 0.16, 'triangle', 0.06), i * 70);
+}); }
+function sndSuper(){ [0, 4, 7, 12, 16].forEach((s, i) => {
+  setTimeout(() => tone(294 * Math.pow(2, s/12), 0.5, 'triangle', 0.09), i * 90);
+}); }
+function sndRescue(){ tone(180, 0.5, 'sawtooth', 0.07, 520); }
+function sndHeart(){ tone(62, 0.16, 'sine', 0.10, 44); }
 
 /* ------------------------------------------------------------------ helpers */
 const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+
 function pickSpawn(){
   const r = Math.random();
   if (r < 0.32) return 0;
@@ -106,7 +122,8 @@ function pickSpawn(){
 function makeBody(x, y, lv, vx, vy){
   const r = LV[lv].r;
   return { x, y, vx: vx || 0, vy: vy || 0, r, lv, m: r*r,
-           angle: 0, av: 0, seed: Math.random()*10, pop: 0, dead: false };
+           angle: 0, av: 0, seed: Math.random()*10, pop: 0, sq: 0,
+           born: tGlobal, dead: false };
 }
 function burst(x, y, col, n, spd){
   for (let i = 0; i < n; i++){
@@ -116,12 +133,50 @@ function burst(x, y, col, n, spd){
                  r: rnd(2, 5), life: 1, col });
   }
 }
-function floatText(x, y, txt, col){
-  floats.push({ x, y, txt, col, life: 1 });
+function floatText(x, y, txt, col, size){
+  floats.push({ x, y, txt, col, life: 1, size: size || 16 });
+}
+function spawnChars(name, ax, ay, bx, by, mx, my){
+  const n = name.length;
+  for (let i = 0; i < n; i++){
+    chars.push({
+      ch: name[i],
+      x0: i % 2 ? ax : bx,
+      y0: i % 2 ? ay : by,
+      x1: mx + (i - (n - 1) / 2) * 15,
+      y1: my,
+      t: -i * 0.04, dur: 0.26
+    });
+  }
 }
 function clampAim(){
   const r = LV[curLv].r;
   aimX = Math.max(JAR.left + r + 2, Math.min(JAR.right - r - 2, aimX));
+}
+
+/* ------------------------------------------------------------------ goals */
+function makeGoals(){
+  const lvT = 5 + Math.floor(Math.random() * 4);
+  const cbT = 3 + Math.floor(Math.random() * 3);
+  const scT = (3 + Math.floor(Math.random() * 5)) * 1000;
+  return [
+    { label: '合成「' + LV[lvT].n + '」', done: false, test: () => maxLevelMade >= lvT },
+    { label: '达成 ' + cbT + ' 连击',     done: false, test: () => maxCombo >= cbT },
+    { label: '分数达到 ' + scT,           done: false, test: () => score >= scT }
+  ];
+}
+function checkGoals(){
+  for (const g of goals){
+    if (g.done) continue;
+    if (g.test()){
+      g.done = true;
+      score += 500;
+      goalFlash = 1;
+      floatText(W/2, 330, '目标达成 +500', '#7CFC9A', 18);
+      sndGoal();
+      if (goals.every(q => q.done)) score += 1500;
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ physics */
@@ -136,6 +191,7 @@ function stepPhysics(dt){
     b.x += b.vx * dt; b.y += b.vy * dt;
     b.angle += b.av * dt; b.av *= 0.985;
     if (b.pop > 0) b.pop = Math.max(0, b.pop - dt * 4.5);
+    if (b.sq > 0) b.sq = Math.max(0, b.sq - dt * 3.2);
   }
   const SLOP = 0.6;
   for (let it = 0; it < ITER; it++){
@@ -187,12 +243,12 @@ function stepPhysics(dt){
       }
       if (a.y + a.r > JAR.bottom){
         a.y = JAR.bottom - a.r;
+        if (a.vy > 150) a.sq = Math.min(1, a.vy / 900);
         if (a.vy > 0) a.vy = -a.vy * REST;
         a.vx *= 0.90;
       }
     }
   }
-  // position-only relaxation: stops small balls being squeezed into big ones
   for (let pass = 0; pass < 2; pass++){
     for (let i = 0; i < n; i++){
       const a = B[i];
@@ -245,27 +301,39 @@ function doMerges(){
       const lv = a.lv;
       combo++;
       comboT = 0.75;
+      if (combo > maxCombo) maxCombo = combo;
       const mult = Math.min(5, 1 + 0.5 * (combo - 1));
+      hitstop = Math.max(hitstop, Math.min(0.085, 0.026 + lv * 0.006));
+
       if (lv < MAXLV){
         const nb = makeBody(mx, my, lv + 1, (a.vx + b.vx)*0.5, (a.vy + b.vy)*0.5);
         nb.x = Math.max(JAR.left + nb.r, Math.min(JAR.right - nb.r, nb.x));
         nb.y = Math.min(JAR.bottom - nb.r, nb.y);
         nb.pop = 1;
-        nb.seed = Math.random()*10;
         B.push(nb);
+        if (lv + 1 > maxLevelMade) maxLevelMade = lv + 1;
         const pts = Math.round((lv + 1) * (lv + 1) * 5 * mult);
         score += pts;
-        floatText(mx, my - 10, '+' + pts, '#FFE9A8');
+        floatText(mx, my - 10, '+' + pts, '#FFE9A8', 14 + lv);
         burst(mx, my, LV[lv + 1].c2, 10, 1);
-        sndMerge(lv);
+        spawnChars(LV[lv + 1].n, a.x, a.y, b.x, b.y, mx, my);
+        sndMerge(lv, combo);
         shake = Math.min(1, shake + 0.25 + lv * 0.08);
+        if (lv + 1 === MAXLV){
+          ceremony = 1.5;
+          sndSuper();
+          burst(mx, my, '#FFF3C4', 40, 2.2);
+          shake = 1;
+        }
+        if (typeof navigator !== 'undefined' && navigator.vibrate) { try { navigator.vibrate(lv >= 5 ? [14,28,14] : 10); } catch(e){} }
       } else {
         const pts = Math.round(2000 * mult);
         score += pts;
-        floatText(mx, my - 10, '+' + pts, '#fff');
-        burst(mx, my, '#FFD1E0', 26, 1.8);
-        sndMerge(lv);
+        floatText(mx, my - 10, '+' + pts, '#fff', 22);
+        burst(mx, my, '#FFD1E0', 30, 1.9);
+        sndMerge(lv, combo);
         shake = 1;
+        if (typeof navigator !== 'undefined' && navigator.vibrate) { try { navigator.vibrate([20,40,20]); } catch(e){} }
       }
       if (score > best){
         best = score;
@@ -273,7 +341,7 @@ function doMerges(){
       }
     }
   }
-  if (any) B = B.filter(b => !b.dead);
+  if (any){ B = B.filter(b => !b.dead); checkGoals(); }
 }
 
 /* ------------------------------------------------------------------ actions */
@@ -290,28 +358,38 @@ function drop(){
   clampAim();
 }
 
+function shakeJar(){
+  for (const b of B){
+    b.vx += rnd(-320, 320);
+    b.vy -= rnd(40, 160);
+  }
+  shake = 1;
+}
+
 function reset(){
-  B = []; parts = []; floats = [];
-  score = 0; combo = 0; comboT = 0; overT = 0;
-  gameOver = false; shake = 0; cool = 0;
+  B = []; parts = []; floats = []; chars = [];
+  score = 0; combo = 0; comboT = 0; maxCombo = 0; maxLevelMade = 0;
+  overT = 0; rescued = false; gameOver = false;
+  shake = 0; cool = 0; hitstop = 0; ceremony = 0; heartT = 0; goalFlash = 0;
   curLv = pickSpawn(); nextLv = pickSpawn();
   aimX = W/2; clampAim();
+  goals = makeGoals();
 }
 
 /* ------------------------------------------------------------------ draw */
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d');
-let dpr = 1, scale = 1;
+let dpr = 1, scl = 1;
 
 function fit(){
   dpr = Math.min(window.devicePixelRatio || 1, 2.5);
   const vw = window.innerWidth, vh = window.innerHeight;
-  scale = Math.min(vw / W, vh / H);
-  cv.style.width = (W * scale) + 'px';
-  cv.style.height = (H * scale) + 'px';
-  cv.width = Math.round(W * scale * dpr);
-  cv.height = Math.round(H * scale * dpr);
-  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+  scl = Math.min(vw / W, vh / H);
+  cv.style.width = (W * scl) + 'px';
+  cv.style.height = (H * scl) + 'px';
+  cv.width = Math.round(W * scl * dpr);
+  cv.height = Math.round(H * scl * dpr);
+  ctx.setTransform(scl * dpr, 0, 0, scl * dpr, 0, 0);
 }
 window.addEventListener('resize', fit);
 
@@ -325,13 +403,13 @@ function roundRect(x, y, w, h, r){
   ctx.closePath();
 }
 
-function drawFruit(x, y, lv, r, pop, seed, isGhost){
+function drawFruit(x, y, lv, r, pop, sq, seed, alpha){
   const L = LV[lv];
   const sc = 1 + pop * 0.30;
   ctx.save();
   ctx.translate(x, y);
-  ctx.scale(sc, sc);
-  if (isGhost) ctx.globalAlpha = 0.9;
+  ctx.scale(sc * (1 + (sq || 0) * 0.11), sc * (1 - (sq || 0) * 0.11));
+  if (alpha != null) ctx.globalAlpha = alpha;
 
   ctx.save();
   ctx.shadowColor = 'rgba(0,0,0,.28)';
@@ -357,7 +435,6 @@ function drawFruit(x, y, lv, r, pop, seed, isGhost){
   }
   ctx.beginPath(); ctx.arc(0, 0, r - ctx.lineWidth*0.5, 0, Math.PI*2); ctx.stroke();
 
-  // shine
   ctx.save();
   ctx.globalAlpha = 0.5;
   ctx.fillStyle = '#fff';
@@ -366,7 +443,6 @@ function drawFruit(x, y, lv, r, pop, seed, isGhost){
   ctx.fill();
   ctx.restore();
 
-  // face
   if (r >= 18){
     const blink = Math.sin(tGlobal * 0.9 + seed * 2.1) > 0.985;
     const ey = -r * 0.26, ex = r * 0.30, er = r * 0.115;
@@ -393,7 +469,6 @@ function drawFruit(x, y, lv, r, pop, seed, isGhost){
     ctx.stroke();
   }
 
-  // name
   const fs = Math.max(7, Math.min(r * 0.56, (r * 1.58) / Math.max(1, L.n.length)));
   ctx.font = '700 ' + fs.toFixed(1) + 'px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.textAlign = 'center';
@@ -404,20 +479,36 @@ function drawFruit(x, y, lv, r, pop, seed, isGhost){
   ctx.restore();
 }
 
+function landingY(x, r){
+  let best = JAR.bottom - r;
+  for (const b of B){
+    const dx = b.x - x;
+    const rr = b.r + r;
+    if (Math.abs(dx) >= rr) continue;
+    const y = b.y - Math.sqrt(rr*rr - dx*dx);
+    if (y < best) best = y;
+  }
+  return best;
+}
+
+function highestTop(){
+  let top = 1e9;
+  for (const b of B){
+    if (b.y - b.r < top) top = b.y - b.r;
+  }
+  return top;
+}
+
 function draw(){
   ctx.save();
-  if (shake > 0.01){
-    ctx.translate(rnd(-1,1)*shake*4, rnd(-1,1)*shake*4);
-  }
+  if (shake > 0.01) ctx.translate(rnd(-1,1)*shake*4, rnd(-1,1)*shake*4);
 
-  // backdrop
   const bg = ctx.createLinearGradient(0, 0, 0, H);
   bg.addColorStop(0, '#241b36');
   bg.addColorStop(1, '#150f22');
   ctx.fillStyle = bg;
   ctx.fillRect(-10, -10, W + 20, H + 20);
 
-  // soft blobs
   ['rgba(255,120,170,.10)', 'rgba(120,200,255,.08)'].forEach((c, i) => {
     const gg = ctx.createRadialGradient(i ? 330 : 70, i ? 520 : 120, 10,
                                         i ? 330 : 70, i ? 520 : 120, 240);
@@ -436,11 +527,19 @@ function draw(){
   ctx.stroke();
   ctx.restore();
 
+  // danger state
+  const top = highestTop();
+  const danger = (B.length && top < 1e8) ? clamp((DANGER_Y + 70 - top) / 70, 0, 1) : 0;
+
   // danger line
   ctx.save();
   ctx.setLineDash([7, 7]);
-  ctx.lineWidth = 1.5;
-  ctx.strokeStyle = overT > 0 ? 'rgba(255,90,130,.85)' : 'rgba(255,255,255,.14)';
+  ctx.lineWidth = 1.5 + danger * 1.2;
+  const pulse = 0.5 + 0.5 * Math.sin(tGlobal * 9);
+  const base = overT > 0 ? 0.55 : 0.14;
+  ctx.strokeStyle = danger > 0.35
+    ? 'rgba(255,90,130,' + (base + danger * 0.35 * pulse).toFixed(3) + ')'
+    : 'rgba(255,255,255,.14)';
   ctx.beginPath();
   ctx.moveTo(JAR.left + 8, DANGER_Y);
   ctx.lineTo(JAR.right - 8, DANGER_Y);
@@ -456,12 +555,45 @@ function draw(){
   ctx.globalAlpha = 1;
 
   // bodies
-  for (const b of B) drawFruit(b.x, b.y, b.lv, b.r, b.pop, b.seed, false);
+  for (const b of B) drawFruit(b.x, b.y, b.lv, b.r, b.pop, b.sq, b.seed, null);
+
+  // landing preview
+  if (!gameOver){
+    const r = LV[curLv].r;
+    const gx = Math.max(JAR.left + r + 2, Math.min(JAR.right - r - 2, aimX));
+    const gy = landingY(gx, r);
+    if (gy - DROP_Y > 40){
+      ctx.save();
+      ctx.globalAlpha = 0.16;
+      ctx.setLineDash([5, 6]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#fff';
+      ctx.beginPath(); ctx.arc(gx, gy, r * 0.94, 0, Math.PI*2); ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // merge characters flying together
+  for (const c of chars){
+    if (c.t < 0) continue;
+    const p = Math.min(1, c.t / c.dur);
+    const e = 1 - Math.pow(1 - p, 3);
+    const x = c.x0 + (c.x1 - c.x0) * e;
+    const y = c.y0 + (c.y1 - c.y0) * e - Math.sin(p * Math.PI) * 16;
+    ctx.save();
+    ctx.globalAlpha = 1 - p * 0.75;
+    ctx.font = '800 17px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff';
+    ctx.fillText(c.ch, x, y);
+    ctx.restore();
+  }
 
   // floating scores
   for (const f of floats){
     ctx.globalAlpha = Math.max(0, Math.min(1, f.life));
-    ctx.font = '800 16px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.font = '800 ' + f.size + 'px "PingFang SC","Microsoft YaHei",sans-serif';
     ctx.textAlign = 'center';
     ctx.fillStyle = f.col;
     ctx.fillText(f.txt, f.x, f.y);
@@ -482,7 +614,16 @@ function draw(){
     ctx.lineTo(x, JAR.bottom);
     ctx.stroke();
     ctx.restore();
-    drawFruit(x, DROP_Y, curLv, r, 0, 0, false);
+    drawFruit(x, DROP_Y, curLv, r, 0, 0, 0, null);
+  }
+
+  // danger vignette
+  if (danger > 0.02){
+    const vg = ctx.createRadialGradient(W/2, H/2, 120, W/2, H/2, 420);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(120,0,40,' + (danger * 0.55).toFixed(3) + ')');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
   }
 
   // HUD
@@ -490,36 +631,50 @@ function draw(){
   ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(255,255,255,.92)';
   ctx.font = '800 21px "PingFang SC","Microsoft YaHei",sans-serif';
-  ctx.fillText('合成丁丁丁', 16, 28);
+  ctx.fillText('合成丁丁丁', 16, 26);
 
-  ctx.font = '600 14px "PingFang SC","Microsoft YaHei",sans-serif';
-  ctx.fillStyle = 'rgba(255,255,255,.55)';
-  ctx.fillText('分数', 16, 58);
+  ctx.font = '600 13px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,.5)';
+  ctx.fillText('分数', 16, 56);
   ctx.fillStyle = '#fff';
   ctx.font = '800 18px "PingFang SC","Microsoft YaHei",sans-serif';
-  ctx.fillText(String(score), 58, 58);
+  ctx.fillText(String(score), 54, 56);
 
   ctx.textAlign = 'right';
-  ctx.font = '600 14px "PingFang SC","Microsoft YaHei",sans-serif';
-  ctx.fillStyle = 'rgba(255,255,255,.55)';
-  ctx.fillText('最高', W - 58, 58);
+  ctx.font = '600 13px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,.5)';
+  ctx.fillText('最高', W - 54, 56);
   ctx.fillStyle = 'rgba(255,255,255,.85)';
   ctx.font = '800 18px "PingFang SC","Microsoft YaHei",sans-serif';
-  ctx.fillText(String(best), W - 16, 58);
+  ctx.fillText(String(best), W - 16, 56);
 
   // next preview
-  const nx = W/2 - 34, ny = 50;
+  const nx = W/2 - 34, ny = 46;
   ctx.beginPath(); ctx.arc(nx, ny, 8, 0, Math.PI*2);
   ctx.fillStyle = LV[nextLv].c1; ctx.fill();
   ctx.lineWidth = 1.6; ctx.strokeStyle = LV[nextLv].c2; ctx.stroke();
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
+  ctx.font = '600 10px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,.40)';
+  ctx.fillText('下一个', nx + 13, ny + 1);
+  ctx.font = '700 11px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,.75)';
+  ctx.fillText(LV[nextLv].n, nx + 52, ny + 1);
+
+  // goal line
+  const todo = goals.filter(g => !g.done);
+  const doneN = goals.length - todo.length;
+  ctx.textAlign = 'center';
   ctx.font = '600 11px "PingFang SC","Microsoft YaHei",sans-serif';
-  ctx.fillStyle = 'rgba(255,255,255,.42)';
-  ctx.fillText('下一个', nx + 14, ny + 1);
-  ctx.font = '700 12px "PingFang SC","Microsoft YaHei",sans-serif';
-  ctx.fillStyle = 'rgba(255,255,255,.78)';
-  ctx.fillText(LV[nextLv].n, nx + 58, ny + 1);
+  if (todo.length){
+    ctx.fillStyle = goalFlash > 0 ? 'rgba(124,252,154,' + (0.5 + goalFlash * 0.5) + ')'
+                                  : 'rgba(255,255,255,.42)';
+    ctx.fillText('目标 ' + (doneN + 1) + '/' + goals.length + ' · ' + todo[0].label, W/2, GOAL_Y);
+  } else {
+    ctx.fillStyle = 'rgba(124,252,154,.85)';
+    ctx.fillText('全部目标达成！', W/2, GOAL_Y);
+  }
 
   // mute button
   ctx.save();
@@ -537,12 +692,54 @@ function draw(){
   if (combo > 1 && comboT > 0){
     ctx.save();
     ctx.globalAlpha = Math.min(1, comboT * 2);
+    const sc2 = 1 + Math.max(0, comboT - 0.6) * 0.6;
+    ctx.translate(W/2, 146);
+    ctx.scale(sc2, sc2);
     ctx.font = '800 22px "PingFang SC","Microsoft YaHei",sans-serif';
     ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
     ctx.fillStyle = '#FFD166';
-    ctx.fillText(combo + ' 连击', W/2, 142);
+    const m = Math.min(5, 1 + 0.5*(combo-1));
+    ctx.fillText(combo + ' 连击  ×' + (m % 1 ? m.toFixed(1) : m), 0, 0);
     ctx.restore();
   }
+
+  // super ding ceremony
+  if (ceremony > 0){
+    const p = 1 - ceremony / 1.5;
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, 1 - p * 1.5) * 0.55;
+    const rg2 = ctx.createRadialGradient(W/2, H/2, 20, W/2, H/2, 430);
+    rg2.addColorStop(0, '#FFF3C4');
+    rg2.addColorStop(0.42, '#FF9EC4');
+    rg2.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = rg2;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, (1 - p) * 2.5);
+    const sc3 = 1 + p * 0.45;
+    ctx.translate(W/2, H/2 - 30);
+    ctx.scale(sc3, sc3);
+    ctx.font = '900 48px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const tg = ctx.createLinearGradient(-110, -24, 110, 24);
+    tg.addColorStop(0, '#FF6B9D');
+    tg.addColorStop(0.5, '#FFD166');
+    tg.addColorStop(1, '#6BE3C2');
+    ctx.fillStyle = tg;
+    ctx.fillText('超级丁', 0, 0);
+    ctx.restore();
+  }
+
+  // version tag
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = '600 9px sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,.22)';
+  ctx.fillText(VERSION, W - 10, H - 8);
 
   // game over
   if (gameOver){
@@ -550,7 +747,7 @@ function draw(){
     ctx.fillRect(0, 0, W, H);
 
     ctx.save();
-    roundRect(W/2 - 150, H/2 - 140, 300, 302, 26);
+    roundRect(W/2 - 150, H/2 - 140, 300, 330, 26);
     ctx.fillStyle = 'rgba(26,18,38,.96)';
     ctx.fill();
     ctx.strokeStyle = 'rgba(255,255,255,.12)';
@@ -562,32 +759,36 @@ function draw(){
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff';
     ctx.font = '800 32px "PingFang SC","Microsoft YaHei",sans-serif';
-    ctx.fillText('装不下啦', W/2, H/2 - 92);
+    ctx.fillText('装不下啦', W/2, H/2 - 96);
 
     ctx.font = '600 14px "PingFang SC","Microsoft YaHei",sans-serif';
     ctx.fillStyle = 'rgba(255,255,255,.55)';
-    ctx.fillText('本局得分', W/2, H/2 - 44);
+    ctx.fillText('本局得分', W/2, H/2 - 50);
 
     ctx.font = '800 46px "PingFang SC","Microsoft YaHei",sans-serif';
     ctx.fillStyle = '#FFB3C9';
-    ctx.fillText(String(score), W/2, H/2 + 4);
+    ctx.fillText(String(score), W/2, H/2 - 4);
 
     ctx.font = '600 13px "PingFang SC","Microsoft YaHei",sans-serif';
     ctx.fillStyle = 'rgba(255,255,255,.45)';
-    ctx.fillText('最高 ' + best, W/2, H/2 + 44);
+    ctx.fillText('最高 ' + best, W/2, H/2 + 36);
+
+    const doneN2 = goals.filter(g => g.done).length;
+    ctx.fillStyle = doneN2 === goals.length ? '#7CFC9A' : 'rgba(255,255,255,.45)';
+    ctx.fillText('目标完成 ' + doneN2 + '/' + goals.length, W/2, H/2 + 60);
 
     ctx.save();
-    roundRect(W/2 - 82, H/2 + 74, 164, 50, 25);
+    roundRect(W/2 - 82, H/2 + 82, 164, 50, 25);
     ctx.fillStyle = '#E55282';
     ctx.fill();
     ctx.fillStyle = '#fff';
     ctx.font = '800 19px "PingFang SC","Microsoft YaHei",sans-serif';
-    ctx.fillText('再来一局', W/2, H/2 + 100);
+    ctx.fillText('再来一局', W/2, H/2 + 108);
     ctx.restore();
 
     ctx.font = '600 12px "PingFang SC","Microsoft YaHei",sans-serif';
     ctx.fillStyle = 'rgba(255,255,255,.30)';
-    ctx.fillText('点击任意处重新开始', W/2, H/2 + 146);
+    ctx.fillText('点击任意处重新开始', W/2, H/2 + 156);
   }
 
   ctx.restore();
@@ -600,8 +801,12 @@ function update(dt){
   if (cool > 0) cool = Math.max(0, cool - dt);
   if (comboT > 0){ comboT -= dt; if (comboT <= 0) combo = 0; }
   if (shake > 0) shake = Math.max(0, shake - dt * 2.2);
+  if (goalFlash > 0) goalFlash = Math.max(0, goalFlash - dt * 1.6);
+  if (ceremony > 0) ceremony = Math.max(0, ceremony - dt);
 
-  if (!gameOver){
+  if (hitstop > 0){
+    hitstop = Math.max(0, hitstop - dt);
+  } else if (!gameOver){
     stepPhysics(dt);
     doMerges();
 
@@ -612,10 +817,29 @@ function update(dt){
       }
     }
     overT = above ? overT + dt : Math.max(0, overT - dt * 2);
+
     if (overT > OVER_TIME){
-      gameOver = true;
-      sndOver();
+      if (!rescued){
+        rescued = true;
+        overT = 0;
+        shakeJar();
+        sndRescue();
+        floatText(W/2, 300, '摇一摇！还剩一次机会', '#FFD166', 20);
+      } else {
+        gameOver = true;
+        sndOver();
+      }
     }
+  }
+
+  // danger heartbeat
+  const top = highestTop();
+  const danger = (B.length && top < 1e8) ? clamp((DANGER_Y + 70 - top) / 70, 0, 1) : 0;
+  if (danger > 0.55 && !gameOver){
+    heartT -= dt;
+    if (heartT <= 0){ sndHeart(); heartT = 0.55 + (1 - danger) * 0.6; }
+  } else {
+    heartT = 0;
   }
 
   for (let i = parts.length - 1; i >= 0; i--){
@@ -628,6 +852,11 @@ function update(dt){
     const f = floats[i];
     f.y -= 34 * dt; f.life -= dt * 1.1;
     if (f.life <= 0) floats.splice(i, 1);
+  }
+  for (let i = chars.length - 1; i >= 0; i--){
+    const c = chars[i];
+    c.t += dt;
+    if (c.t > c.dur + 0.2) chars.splice(i, 1);
   }
 }
 
@@ -675,11 +904,11 @@ function endPointer(e){
   e.preventDefault();
   if (swallow){ swallow = false; return; }
   if (gameOver) return;
-  if (toLogicalPoint(e).y < 88) return;
+  if (toLogicalPoint(e).y < 92) return;
   drop();
 }
 cv.addEventListener('pointerup', endPointer);
-cv.addEventListener('pointercancel', e => { swallow = false; });
+cv.addEventListener('pointercancel', () => { swallow = false; });
 window.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft'){ aimX -= 18; clampAim(); }
   else if (e.key === 'ArrowRight'){ aimX += 18; clampAim(); }
@@ -698,9 +927,14 @@ window.__DDD = {
   set score(v){ score = v; },
   get gameOver(){ return gameOver; },
   set gameOver(v){ gameOver = v; },
-  get overT(){ return overT; },
+  get combo(){ return combo; },
+  get goals(){ return goals; },
+  get rescued(){ return rescued; },
   stepPhysics, doMerges, makeBody, pickSpawn, reset, drop, update,
-  JAR, DROP_Y, SUB, DANGER_Y, LV, MAXLV
+  setAim(x){ aimX = x; clampAim(); },
+  gotoOver(){ gameOver = false; },
+  landingY, highestTop,
+  JAR, DROP_Y, SUB, DANGER_Y, LV, MAXLV, VERSION
 };
 
 /* ------------------------------------------------------------------ boot */
