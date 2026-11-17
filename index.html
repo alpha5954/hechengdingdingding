@@ -23,10 +23,10 @@
 'use strict';
 
 /* ------------------------------------------------------------------ config */
-const VERSION = 'v1.1';
+const VERSION = 'v1.4';
 const W = 400, H = 620;
-const JAR = { left: 14, right: 386, top: 148, bottom: 596 };
-const DANGER_Y = 196;
+const JAR = { left: 34, right: 366, top: 148, bottom: 596 };
+const DANGER_Y = 232;
 const DROP_Y = 116;
 const GOAL_Y = 74;
 const GRAV = 1500;
@@ -54,7 +54,7 @@ const MAXLV = LV.length - 1;
 
 /* ------------------------------------------------------------------ state */
 let B = [], parts = [], floats = [], chars = [];
-let score = 0, best = 0, combo = 0, comboT = 0, maxCombo = 0, maxLevelMade = 0;
+let score = 0, best = 0, combo = 0, comboT = 0, maxCombo = 0, maxLevelMade = 0, merges = 0;
 let curLv = 0, nextLv = 0, aimX = W/2, cool = 0;
 let gameOver = false, overT = 0, rescued = false, shake = 0, tGlobal = 0;
 let hitstop = 0, ceremony = 0, heartT = 0, goals = [], goalFlash = 0;
@@ -113,10 +113,10 @@ const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
 
 function pickSpawn(){
   const r = Math.random();
-  if (r < 0.32) return 0;
-  if (r < 0.60) return 1;
-  if (r < 0.80) return 2;
-  if (r < 0.93) return 3;
+  if (r < 0.22) return 0;
+  if (r < 0.48) return 1;
+  if (r < 0.72) return 2;
+  if (r < 0.92) return 3;
   return 4;
 }
 function makeBody(x, y, lv, vx, vy){
@@ -156,13 +156,21 @@ function clampAim(){
 
 /* ------------------------------------------------------------------ goals */
 function makeGoals(){
-  const lvT = 5 + Math.floor(Math.random() * 4);
-  const cbT = 3 + Math.floor(Math.random() * 3);
-  const scT = (3 + Math.floor(Math.random() * 5)) * 1000;
+  const lvT = 8 + Math.floor(Math.random() * 2);            // 丁丁丁丁丁 ~ 丁丁丁丁丁丁
+  const cbT = 10 + Math.floor(Math.random() * 5);           // 10 ~ 14 连击
+  const scT = (30 + Math.floor(Math.random() * 3) * 10) * 1000;  // 3万 / 4万 / 5万
+  const mgT = 180 + Math.floor(Math.random() * 5) * 20;     // 180 ~ 260 次
   return [
-    { label: '合成「' + LV[lvT].n + '」', done: false, test: () => maxLevelMade >= lvT },
-    { label: '达成 ' + cbT + ' 连击',     done: false, test: () => maxCombo >= cbT },
-    { label: '分数达到 ' + scT,           done: false, test: () => score >= scT }
+    { done: false, label: () => '合成「' + LV[lvT].n + '」',
+      test: () => maxLevelMade >= lvT },
+    { done: false, label: () => '连击 ' + Math.min(maxCombo, cbT) + '/' + cbT,
+      test: () => maxCombo >= cbT },
+    { done: false, label: () => '分数 ' + Math.min(score, scT) + '/' + scT,
+      test: () => score >= scT },
+    { done: false, label: () => '合成 ' + Math.min(merges, mgT) + '/' + mgT + ' 次',
+      test: () => merges >= mgT },
+    { done: false, label: () => '合出「超级丁」',
+      test: () => maxLevelMade >= MAXLV }
   ];
 }
 function checkGoals(){
@@ -170,11 +178,14 @@ function checkGoals(){
     if (g.done) continue;
     if (g.test()){
       g.done = true;
-      score += 500;
+      score += 800;
       goalFlash = 1;
-      floatText(W/2, 330, '目标达成 +500', '#7CFC9A', 18);
+      floatText(W/2, 330, '目标达成 +800', '#7CFC9A', 18);
       sndGoal();
-      if (goals.every(q => q.done)) score += 1500;
+      if (goals.every(q => q.done)){
+        score += 3000;
+        floatText(W/2, 300, '全部目标达成 +3000', '#FFD166', 20);
+      }
     }
   }
 }
@@ -300,6 +311,7 @@ function doMerges(){
       const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
       const lv = a.lv;
       combo++;
+      merges++;
       comboT = 0.75;
       if (combo > maxCombo) maxCombo = combo;
       const mult = Math.min(5, 1 + 0.5 * (combo - 1));
@@ -368,7 +380,7 @@ function shakeJar(){
 
 function reset(){
   B = []; parts = []; floats = []; chars = [];
-  score = 0; combo = 0; comboT = 0; maxCombo = 0; maxLevelMade = 0;
+  score = 0; combo = 0; comboT = 0; maxCombo = 0; maxLevelMade = 0; merges = 0;
   overT = 0; rescued = false; gameOver = false;
   shake = 0; cool = 0; hitstop = 0; ceremony = 0; heartT = 0; goalFlash = 0;
   curLv = pickSpawn(); nextLv = pickSpawn();
@@ -633,20 +645,37 @@ function draw(){
   ctx.font = '800 21px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillText('合成丁丁丁', 16, 26);
 
+  // score (left): label sits after the number, number shrinks if it gets long
+  ctx.textAlign = 'left';
   ctx.font = '600 13px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,.5)';
   ctx.fillText('分数', 16, 56);
+  const labelW = ctx.measureText('分数').width;
+  const scoreTxt = String(score);
+  let sfs = 18;
+  ctx.font = '800 ' + sfs + 'px "PingFang SC","Microsoft YaHei",sans-serif';
+  while (sfs > 11 && ctx.measureText(scoreTxt).width > 118){
+    sfs -= 1;
+    ctx.font = '800 ' + sfs + 'px "PingFang SC","Microsoft YaHei",sans-serif';
+  }
   ctx.fillStyle = '#fff';
-  ctx.font = '800 18px "PingFang SC","Microsoft YaHei",sans-serif';
-  ctx.fillText(String(score), 54, 56);
+  ctx.fillText(scoreTxt, 16 + labelW + 8, 56);
 
+  // best (right): label is placed to the left of the number
   ctx.textAlign = 'right';
+  const bestTxt = String(best);
+  let bfs = 18;
+  ctx.font = '800 ' + bfs + 'px "PingFang SC","Microsoft YaHei",sans-serif';
+  while (bfs > 11 && ctx.measureText(bestTxt).width > 110){
+    bfs -= 1;
+    ctx.font = '800 ' + bfs + 'px "PingFang SC","Microsoft YaHei",sans-serif';
+  }
+  const bestW = ctx.measureText(bestTxt).width;
+  ctx.fillStyle = 'rgba(255,255,255,.85)';
+  ctx.fillText(bestTxt, W - 16, 56);
   ctx.font = '600 13px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,.5)';
-  ctx.fillText('最高', W - 54, 56);
-  ctx.fillStyle = 'rgba(255,255,255,.85)';
-  ctx.font = '800 18px "PingFang SC","Microsoft YaHei",sans-serif';
-  ctx.fillText(String(best), W - 16, 56);
+  ctx.fillText('最高', W - 16 - bestW - 8, 56);
 
   // next preview
   const nx = W/2 - 34, ny = 46;
@@ -662,19 +691,27 @@ function draw(){
   ctx.fillStyle = 'rgba(255,255,255,.75)';
   ctx.fillText(LV[nextLv].n, nx + 52, ny + 1);
 
-  // goal line
+  // goal line + progress dots
   const todo = goals.filter(g => !g.done);
   const doneN = goals.length - todo.length;
-  ctx.textAlign = 'center';
   ctx.font = '600 11px "PingFang SC","Microsoft YaHei",sans-serif';
-  if (todo.length){
-    ctx.fillStyle = goalFlash > 0 ? 'rgba(124,252,154,' + (0.5 + goalFlash * 0.5) + ')'
-                                  : 'rgba(255,255,255,.42)';
-    ctx.fillText('目标 ' + (doneN + 1) + '/' + goals.length + ' · ' + todo[0].label, W/2, GOAL_Y);
-  } else {
-    ctx.fillStyle = 'rgba(124,252,154,.85)';
-    ctx.fillText('全部目标达成！', W/2, GOAL_Y);
+  ctx.textAlign = 'left';
+  const gLabel = todo.length
+    ? ('目标 ' + (doneN + 1) + '/' + goals.length + ' · ' + todo[0].label())
+    : '全部目标达成！';
+  const gW = ctx.measureText(gLabel).width;
+  const dotGap = 7, dotsW = goals.length * dotGap;
+  const gx0 = W/2 - (gW + dotsW + 8) / 2;
+  for (let i = 0; i < goals.length; i++){
+    ctx.beginPath();
+    ctx.arc(gx0 + i * dotGap + 2.5, GOAL_Y, 2.5, 0, Math.PI*2);
+    ctx.fillStyle = goals[i].done ? '#7CFC9A' : 'rgba(255,255,255,.32)';
+    ctx.fill();
   }
+  ctx.fillStyle = todo.length
+    ? (goalFlash > 0 ? 'rgba(124,252,154,' + (0.5 + goalFlash * 0.5) + ')' : 'rgba(255,255,255,.42)')
+    : 'rgba(124,252,154,.85)';
+  ctx.fillText(gLabel, gx0 + dotsW + 8, GOAL_Y);
 
   // mute button
   ctx.save();
@@ -928,6 +965,9 @@ window.__DDD = {
   get gameOver(){ return gameOver; },
   set gameOver(v){ gameOver = v; },
   get combo(){ return combo; },
+  get maxCombo(){ return maxCombo; },
+  get maxLevel(){ return maxLevelMade; },
+  get merges(){ return merges; },
   get goals(){ return goals; },
   get rescued(){ return rescued; },
   stepPhysics, doMerges, makeBody, pickSpawn, reset, drop, update,
